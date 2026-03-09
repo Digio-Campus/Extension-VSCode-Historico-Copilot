@@ -38,8 +38,10 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("node:fs/promises"));
 const path = __importStar(require("node:path"));
+const sessionDatabase_1 = require("./sessionDatabase");
 const CHAT_PARTICIPANT_ID = 'recuperar-historico-copilot.recuperador';
 const WORKSPACE_STORAGE_PATH = 'C:\\Users\\Usuario\\AppData\\Roaming\\Code\\User\\workspaceStorage';
+const DATABASE_FILE_NAME = 'historico-sesiones.db';
 function normalizePathForSearch(value) {
     return value.replaceAll('\\', '/').toLowerCase();
 }
@@ -105,7 +107,20 @@ function extractCustomTitleFromJsonl(content) {
     }
     return undefined;
 }
-async function logChatSessionCustomTitles(candidateFolder) {
+function buildSessionKey(storageFolder, sessionFile) {
+    return `${normalizePathForSearch(storageFolder)}::${sessionFile.toLowerCase()}`;
+}
+function logSessionsInConsole(title, sessions) {
+    console.log(`[historico] ${title} (${sessions.length})`);
+    if (sessions.length === 0) {
+        console.log('[historico] - ninguna');
+        return;
+    }
+    for (const session of sessions) {
+        console.log(`[historico] - ${session.customTitle} | ${session.storageFolder}\\chatSessions\\${session.sessionFile}`);
+    }
+}
+async function collectChatSessionCustomTitles(candidateFolder) {
     const chatSessionsFolder = path.join(candidateFolder, 'chatSessions');
     let chatSessionsEntries;
     try {
@@ -115,23 +130,27 @@ async function logChatSessionCustomTitles(candidateFolder) {
         const nodeError = error;
         if (nodeError.code === 'ENOENT') {
             console.log(`[historico] La carpeta chatSessions no existe en: ${candidateFolder}`);
-            return;
+            return [];
         }
         console.warn(`[historico] No se pudo leer la carpeta chatSessions en ${candidateFolder}: ${nodeError.message}`);
-        return;
+        return [];
     }
     const jsonlFiles = chatSessionsEntries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl'));
     if (jsonlFiles.length === 0) {
         console.log(`[historico] No hay archivos .jsonl en: ${chatSessionsFolder}`);
-        return;
+        return [];
     }
-    await Promise.all(jsonlFiles.map(async (jsonlFile) => {
+    const sessionsWithTitle = await Promise.all(jsonlFiles.map(async (jsonlFile) => {
         const jsonlPath = path.join(chatSessionsFolder, jsonlFile.name);
         try {
             const jsonlContent = await fs.readFile(jsonlPath, 'utf8');
             const customTitle = extractCustomTitleFromJsonl(jsonlContent);
             if (customTitle) {
-                console.log(`[historico] customTitle (${jsonlFile.name}): ${customTitle}`);
+                return {
+                    storageFolder: candidateFolder,
+                    sessionFile: jsonlFile.name,
+                    customTitle,
+                };
             }
             else {
                 console.log(`[historico] No se encontro customTitle en: ${jsonlFile.name}`);
@@ -141,7 +160,9 @@ async function logChatSessionCustomTitles(candidateFolder) {
             const nodeError = error;
             console.warn(`[historico] No se pudo leer ${jsonlPath}: ${nodeError.message}`);
         }
+        return undefined;
     }));
+    return sessionsWithTitle.filter((session) => Boolean(session));
 }
 async function findMatchingWorkspaceStorageFolders(currentWorkspacePath) {
     const directoryEntries = await fs.readdir(WORKSPACE_STORAGE_PATH, { withFileTypes: true });
@@ -210,9 +231,59 @@ function activate(context) {
             console.log('[historico] Carpetas encontradas:');
             for (const folder of matchingFolders) {
                 console.log(folder);
-                await logChatSessionCustomTitles(folder);
             }
-            response.markdown(`Se encontraron ${matchingFolders.length} carpeta(s). Revisa la consola del Extension Host para ver el detalle.`);
+            const detectedTitlesByFolder = await Promise.all(matchingFolders.map((folder) => collectChatSessionCustomTitles(folder)));
+            const detectedTitles = detectedTitlesByFolder.flat();
+            if (detectedTitles.length === 0) {
+                console.log('[historico] No se detectaron sesiones con customTitle para almacenar.');
+                response.markdown('Se encontraron carpetas coincidentes, pero no sesiones con `customTitle`.');
+                return;
+            }
+            const dbFilePath = path.join(context.globalStorageUri.fsPath, DATABASE_FILE_NAME);
+            console.log(`[historico] Se van a procesar ${detectedTitles.length} sesiones con customTitle. Ruta de DB: ${dbFilePath}`);
+            let database;
+            try {
+                database = await sessionDatabase_1.SessionDatabase.create(dbFilePath);
+                const storedSessions = await database.getSessionsByWorkspace(currentWorkspacePath);
+                const storedByKey = new Map();
+                for (const session of storedSessions) {
+                    storedByKey.set(buildSessionKey(session.storageFolder, session.sessionFile), session);
+                }
+                const alreadyStoredSessions = [];
+                const sessionsToStore = [];
+                for (const detectedTitle of detectedTitles) {
+                    const record = {
+                        workspacePath: currentWorkspacePath,
+                        storageFolder: detectedTitle.storageFolder,
+                        sessionFile: detectedTitle.sessionFile,
+                        customTitle: detectedTitle.customTitle,
+                    };
+                    const key = buildSessionKey(record.storageFolder, record.sessionFile);
+                    const existingSession = storedByKey.get(key);
+                    if (existingSession && existingSession.customTitle === record.customTitle) {
+                        alreadyStoredSessions.push(record);
+                    }
+                    else {
+                        sessionsToStore.push(record);
+                    }
+                }
+                logSessionsInConsole('Sesiones ya almacenadas en SQLite', alreadyStoredSessions);
+                logSessionsInConsole('Sesiones que se van a almacenar en SQLite', sessionsToStore);
+                await database.upsertSessions(sessionsToStore);
+                response.markdown(`Se detectaron ${detectedTitles.length} sesiones con customTitle. ` +
+                    `${alreadyStoredSessions.length} ya estaban guardadas y ${sessionsToStore.length} se guardaron en SQLite. ` +
+                    `Revisa la consola del Extension Host para ver el detalle.`);
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                response.markdown(`Error trabajando con SQLite: ${message}`);
+                console.error('[historico] Error guardando sesiones en SQLite:', error);
+            }
+            finally {
+                if (database) {
+                    await database.close();
+                }
+            }
         }
     });
     context.subscriptions.push(helloWorldCommand);
