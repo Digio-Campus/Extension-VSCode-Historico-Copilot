@@ -14,6 +14,16 @@ interface DetectedSessionTitle {
 	customTitle: string;
 }
 
+interface ProcessingOutcome {
+	statusMessage: string;
+	contextForModel: string;
+}
+
+const DEFAULT_CHAT_MODEL_SELECTOR: vscode.LanguageModelChatSelector = {
+	vendor: 'copilot',
+	family: 'gpt-4.1',
+};
+
 function normalizePathForSearch(value: string): string {
 	return value.replaceAll('\\', '/').toLowerCase();
 }
@@ -200,6 +210,76 @@ async function findMatchingWorkspaceStorageFolders(currentWorkspacePath: string)
 	return matches.sort();
 }
 
+function buildModelContextFromDetectedTitles(detectedTitles: DetectedSessionTitle[]): string {
+	if (detectedTitles.length === 0) {
+		return 'No se detectaron customTitle en los jsonl analizados.';
+	}
+
+	const maxTitles = 15;
+	const titleLines = detectedTitles
+		.slice(0, maxTitles)
+		.map((title) => `- ${title.customTitle}`)
+		.join('\n');
+	const overflowCount = Math.max(0, detectedTitles.length - maxTitles);
+	const overflowLine = overflowCount > 0 ? `\n- ... y ${overflowCount} titulo(s) mas` : '';
+
+	return `Titulos detectados (${detectedTitles.length}):\n${titleLines}${overflowLine}`;
+}
+
+async function resolveModelWithDefaultPreference(requestModel: vscode.LanguageModelChat): Promise<vscode.LanguageModelChat> {
+	try {
+		const preferredModels = await vscode.lm.selectChatModels(DEFAULT_CHAT_MODEL_SELECTOR);
+		if (preferredModels.length > 0) {
+			return preferredModels[0];
+		}
+	} catch (error) {
+		console.warn('[historico] No se pudo seleccionar GPT-4.1 por defecto:', error);
+	}
+
+	return requestModel;
+}
+
+async function answerInvocationPrompt(
+	request: vscode.ChatRequest,
+	response: vscode.ChatResponseStream,
+	token: vscode.CancellationToken,
+	processingContext: string,
+): Promise<void> {
+	const model = await resolveModelWithDefaultPreference(request.model);
+	const promptToAnswer = request.prompt.trim().length > 0
+		? request.prompt.trim()
+		: 'Explica brevemente el resultado del procesamiento realizado por @historico.';
+
+	response.progress(`Respondiendo al prompt con el modelo: ${model.name}`);
+
+	const llmPrompt = [
+		'Eres el participante @historico de una extension de VS Code.',
+		'Responde en espanol de forma clara y util usando el contexto disponible.',
+		'',
+		'Contexto del procesamiento ya ejecutado:',
+		processingContext,
+		'',
+		`Prompt del usuario: ${promptToAnswer}`,
+	].join('\n');
+
+	try {
+		const llmResponse = await model.sendRequest(
+			[vscode.LanguageModelChatMessage.User(llmPrompt)],
+			undefined,
+			token,
+		);
+
+		response.markdown('\n\n---\n\n**Respuesta al prompt**\n\n');
+		for await (const chunk of llmResponse.text) {
+			response.markdown(chunk);
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		response.markdown(`\n\nNo se pudo generar respuesta con el modelo: ${message}`);
+		console.error('[historico] Error al responder el prompt con el modelo:', error);
+	}
+}
+
 
 export function activate(context: vscode.ExtensionContext): void {
 
@@ -207,12 +287,18 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.showInformationMessage('Participante de chat @historico listo para leer sesiones previas.');
 	});
 
-	const participant = vscode.chat.createChatParticipant(CHAT_PARTICIPANT_ID, async (_request, _chatContext, response) => {
+	const participant = vscode.chat.createChatParticipant(CHAT_PARTICIPANT_ID, async (request, _chatContext, response, token) => {
 		const currentWorkspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		let processingOutcome: ProcessingOutcome;
 
 		if (!currentWorkspacePath) {
-			response.markdown('No hay un workspace abierto para comparar rutas.');
+			processingOutcome = {
+				statusMessage: 'No hay un workspace abierto para comparar rutas.',
+				contextForModel: 'No habia workspace abierto al invocar el participante.',
+			};
+			response.markdown(processingOutcome.statusMessage);
 			console.warn('[historico] No se encontro un workspace abierto.');
+			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 
@@ -223,15 +309,25 @@ export function activate(context: vscode.ExtensionContext): void {
 			matchingFolders = await findMatchingWorkspaceStorageFolders(currentWorkspacePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			response.markdown(`Error al buscar en workspaceStorage: ${message}`);
+			processingOutcome = {
+				statusMessage: `Error al buscar en workspaceStorage: ${message}`,
+				contextForModel: `Fallo en busqueda de workspaceStorage para ${currentWorkspacePath}: ${message}`,
+			};
+			response.markdown(processingOutcome.statusMessage);
 			console.error('[historico] Error escaneando workspaceStorage:', error);
+			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 
 		console.log(`[historico] Workspace actual: ${currentWorkspacePath} y matchingFolders encontrados: ${matchingFolders.length}`);
 		if (matchingFolders.length === 0) {
 			console.log('[historico] No se encontraron carpetas con la ruta del workspace actual.');
-			response.markdown('No se encontraron carpetas coincidentes en `workspaceStorage`.');
+			processingOutcome = {
+				statusMessage: 'No se encontraron carpetas coincidentes en `workspaceStorage`.',
+				contextForModel: `No hubo coincidencias de workspaceStorage para ${currentWorkspacePath}.`,
+			};
+			response.markdown(processingOutcome.statusMessage);
+			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 		else {
@@ -247,7 +343,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (detectedTitles.length === 0) {
 				console.log('[historico] No se detectaron sesiones con customTitle para almacenar.');
-				response.markdown('Se encontraron carpetas coincidentes, pero no sesiones con `customTitle`.');
+				processingOutcome = {
+					statusMessage: 'Se encontraron carpetas coincidentes, pero no sesiones con `customTitle`.',
+					contextForModel: `Se encontraron ${matchingFolders.length} carpeta(s) coincidente(s), pero sin customTitle.`,
+				};
+				response.markdown(processingOutcome.statusMessage);
+				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 				return;
 			}
 
@@ -290,15 +391,32 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				await database.upsertSessions(sessionsToStore);
 
-				response.markdown(
-					`Se detectaron ${detectedTitles.length} sesiones con customTitle. ` +
-					`${alreadyStoredSessions.length} ya estaban guardadas y ${sessionsToStore.length} se guardaron en SQLite. ` +
-					`Revisa la consola del Extension Host para ver el detalle.`,
-				);
+				processingOutcome = {
+					statusMessage:
+						`Se detectaron ${detectedTitles.length} sesiones con customTitle. ` +
+						`${alreadyStoredSessions.length} ya estaban guardadas y ${sessionsToStore.length} se guardaron en SQLite. ` +
+						'Revisa la consola del Extension Host para ver el detalle.',
+					contextForModel: [
+						`Workspace: ${currentWorkspacePath}`,
+						`Carpetas coincidentes: ${matchingFolders.length}`,
+						`Sesiones detectadas con customTitle: ${detectedTitles.length}`,
+						`Ya almacenadas: ${alreadyStoredSessions.length}`,
+						`Insertadas/actualizadas en SQLite: ${sessionsToStore.length}`,
+						buildModelContextFromDetectedTitles(detectedTitles),
+					].join('\n'),
+				};
+
+				response.markdown(processingOutcome.statusMessage);
+				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				response.markdown(`Error trabajando con SQLite: ${message}`);
+				processingOutcome = {
+					statusMessage: `Error trabajando con SQLite: ${message}`,
+					contextForModel: `Fallo al guardar sesiones para ${currentWorkspacePath}: ${message}`,
+				};
+				response.markdown(processingOutcome.statusMessage);
 				console.error('[historico] Error guardando sesiones en SQLite:', error);
+				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
 			} finally {
 				if (database) {
 					await database.close();
