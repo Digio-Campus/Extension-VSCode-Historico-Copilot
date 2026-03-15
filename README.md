@@ -6,7 +6,7 @@ Extensión de VS Code que busca sesiones previas de Copilot Chat en `workspaceSt
 
 - Localiza carpetas de `workspaceStorage` asociadas al workspace abierto.
 - Escanea `chatSessions/*.jsonl` y detecta sesiones con `customTitle`.
-- Guarda en SQLite (usando `sqlite3`) los `customTitle` detectados por workspace.
+- Guarda en SQLite (usando `better-sqlite3`) los `customTitle` detectados por workspace.
 - Muestra en consola dos grupos al usar la extensión:
 - sesiones ya almacenadas en la base de datos
 - sesiones nuevas o actualizadas que se van a almacenar
@@ -28,7 +28,7 @@ La combinación `workspace_path + storage_folder + session_file` es única para 
 
 ## Dependencias
 
-- `sqlite3`
+- `better-sqlite3`
 
 ## Uso
 

@@ -1,6 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import sqlite3 = require('sqlite3');
+import BetterSqlite3 = require('better-sqlite3');
+
+type SqliteDatabase = ReturnType<typeof BetterSqlite3>;
 
 export interface SessionRecord {
 	workspacePath: string;
@@ -9,64 +11,30 @@ export interface SessionRecord {
 	customTitle: string;
 }
 
-function openDatabase(dbFilePath: string): Promise<sqlite3.Database> {
-	return new Promise((resolve, reject) => {
-		const db = new sqlite3.Database(dbFilePath, (error) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-
-			resolve(db);
-		});
-	});
+function openDatabase(dbFilePath: string): SqliteDatabase {
+	const db = new BetterSqlite3(dbFilePath);
+	db.pragma('journal_mode = WAL');
+	return db;
 }
 
-function run(db: sqlite3.Database, sql: string, params: unknown[] = []): Promise<void> {
-	return new Promise((resolve, reject) => {
-		db.run(sql, params, (error) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-
-			resolve();
-		});
-	});
+function run(db: SqliteDatabase, sql: string, params: unknown[] = []): void {
+	db.prepare(sql).run(...params);
 }
 
-function all<T>(db: sqlite3.Database, sql: string, params: unknown[] = []): Promise<T[]> {
-	return new Promise((resolve, reject) => {
-		db.all(sql, params, (error, rows) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-
-			resolve(rows as T[]);
-		});
-	});
+function all<T>(db: SqliteDatabase, sql: string, params: unknown[] = []): T[] {
+	return db.prepare(sql).all(...params) as T[];
 }
 
-function closeDatabase(db: sqlite3.Database): Promise<void> {
-	return new Promise((resolve, reject) => {
-		db.close((error) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-
-			resolve();
-		});
-	});
+function closeDatabase(db: SqliteDatabase): void {
+	db.close();
 }
 
 export class SessionDatabase {
-	private constructor(private readonly db: sqlite3.Database) {}
+	private constructor(private readonly db: SqliteDatabase) {}
 
 	public static async create(dbFilePath: string): Promise<SessionDatabase> {
 		await fs.mkdir(path.dirname(dbFilePath), { recursive: true });
-		const db = await openDatabase(dbFilePath);
+		const db = openDatabase(dbFilePath);
 		const instance = new SessionDatabase(db);
 		await instance.initialize();
 		return instance;
@@ -93,7 +61,7 @@ export class SessionDatabase {
 	}
 
 	public async getSessionsByWorkspace(workspacePath: string): Promise<SessionRecord[]> {
-		const rows = await all<SessionRecord>(
+		const rows = all<SessionRecord>(
 			this.db,
 			`SELECT workspace_path AS workspacePath,
 					storage_folder AS storageFolder,
@@ -112,35 +80,35 @@ export class SessionDatabase {
 			return;
 		}
 
-		await run(this.db, 'BEGIN TRANSACTION');
+		const upsertSession = this.db.prepare(
+			`INSERT INTO workspace_sessions (
+				workspace_path,
+				storage_folder,
+				session_file,
+				custom_title
+			)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(workspace_path, storage_folder, session_file)
+			DO UPDATE SET
+				custom_title = excluded.custom_title,
+				updated_at = CURRENT_TIMESTAMP`,
+		);
 
-		try {
-			for (const session of sessions) {
-				await run(
-					this.db,
-					`INSERT INTO workspace_sessions (
-						workspace_path,
-						storage_folder,
-						session_file,
-						custom_title
-					)
-					VALUES (?, ?, ?, ?)
-					ON CONFLICT(workspace_path, storage_folder, session_file)
-					DO UPDATE SET
-						custom_title = excluded.custom_title,
-						updated_at = CURRENT_TIMESTAMP`,
-					[session.workspacePath, session.storageFolder, session.sessionFile, session.customTitle],
+		const upsertTransaction = this.db.transaction((items: SessionRecord[]) => {
+			for (const session of items) {
+				upsertSession.run(
+					session.workspacePath,
+					session.storageFolder,
+					session.sessionFile,
+					session.customTitle,
 				);
 			}
+		});
 
-			await run(this.db, 'COMMIT');
-		} catch (error) {
-			await run(this.db, 'ROLLBACK');
-			throw error;
-		}
+		upsertTransaction(sessions);
 	}
 
 	public async close(): Promise<void> {
-		await closeDatabase(this.db);
+		closeDatabase(this.db);
 	}
 }

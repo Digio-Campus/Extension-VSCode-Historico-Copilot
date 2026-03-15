@@ -43,9 +43,9 @@
     "test": "vscode-test"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/sqlite3": "^3.1.11",
     "@types/vscode": "^1.109.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
@@ -54,6 +54,6 @@
     "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
-    "sqlite3": "^5.1.7"
+    "better-sqlite3": "^12.8.0"
   }
 }

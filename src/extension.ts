@@ -504,22 +504,22 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 
-				logSessionsInConsole('Sesiones ya almacenadas en SQLite', alreadyStoredSessions);
-				logSessionsInConsole('Sesiones que se van a almacenar en SQLite', sessionsToStore);
+				logSessionsInConsole('Sesiones ya almacenadas en better-sqlite3', alreadyStoredSessions);
+				logSessionsInConsole('Sesiones que se van a almacenar en better-sqlite3', sessionsToStore);
 
 				await database.upsertSessions(sessionsToStore);
 
 				processingOutcome = {
 					statusMessage:
 						`Se detectaron ${detectedTitles.length} sesiones con customTitle. ` +
-						`${alreadyStoredSessions.length} ya estaban guardadas y ${sessionsToStore.length} se guardaron en SQLite. ` +
+						`${alreadyStoredSessions.length} ya estaban guardadas y ${sessionsToStore.length} se guardaron en better-sqlite3. ` +
 						'Revisa la consola del Extension Host para ver el detalle.',
 					contextForModel: [
 						`Workspace: ${currentWorkspacePath}`,
 						`Carpetas coincidentes: ${matchingFolders.length}`,
 						`Sesiones detectadas con customTitle: ${detectedTitles.length}`,
 						`Ya almacenadas: ${alreadyStoredSessions.length}`,
-						`Insertadas/actualizadas en SQLite: ${sessionsToStore.length}`,
+						`Insertadas/actualizadas en better-sqlite3: ${sessionsToStore.length}`,
 						buildModelContextFromDetectedTitles(detectedTitles),
 					].join('\n'),
 				};
@@ -529,11 +529,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				processingOutcome = {
-					statusMessage: `Error trabajando con SQLite: ${message}`,
+					statusMessage: `Error trabajando con better-sqlite3: ${message}`,
 					contextForModel: `Fallo al guardar sesiones para ${currentWorkspacePath}: ${message}`,
 				};
 				response.markdown(processingOutcome.statusMessage);
-				console.error('[historico] Error guardando sesiones en SQLite:', error);
+				console.error('[historico] Error guardando sesiones en better-sqlite3:', error);
 				await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			} finally {
 				if (database) {
