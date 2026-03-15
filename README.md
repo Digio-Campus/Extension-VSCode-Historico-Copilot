@@ -33,5 +33,7 @@ La combinación `workspace_path + storage_folder + session_file` es única para 
 ## Uso
 
 1. Abre un workspace en VS Code.
-2. Invoca el participante de chat `@historico`.
-3. Revisa la consola del Extension Host para ver qué sesiones ya estaban guardadas y cuáles se insertaron en SQLite.
+2. Opcional: ejecuta el comando `Historico: Seleccionar modelo de IA del participante` desde la paleta de comandos para elegir el modelo de GitHub Copilot que usara `@historico`.
+3. Si no eliges uno, el participante usara por defecto un modelo de la familia `gpt-4.1` (si esta disponible).
+4. Invoca el participante de chat `@historico`.
+5. Revisa la consola del Extension Host para ver qué sesiones ya estaban guardadas y cuáles se insertaron en SQLite.

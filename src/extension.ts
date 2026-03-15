@@ -5,8 +5,11 @@ import type { Dirent } from 'node:fs';
 import { SessionDatabase, type SessionRecord } from './sessionDatabase';
 
 const CHAT_PARTICIPANT_ID = 'recuperar-historico-copilot.recuperador';
+const SELECT_MODEL_COMMAND_ID = 'recuperar-historico-copilot.selectChatModel';
 const WORKSPACE_STORAGE_PATH = 'C:\\Users\\Usuario\\AppData\\Roaming\\Code\\User\\workspaceStorage';
 const DATABASE_FILE_NAME = 'historico-sesiones.db';
+const MODEL_GLOBAL_STATE_KEY = 'historico.selectedCopilotModelId';
+const DEFAULT_MODEL_FAMILY = 'gpt-4.1';
 
 interface DetectedSessionTitle {
 	storageFolder: string;
@@ -19,9 +22,12 @@ interface ProcessingOutcome {
 	contextForModel: string;
 }
 
-const DEFAULT_CHAT_MODEL_SELECTOR: vscode.LanguageModelChatSelector = {
+interface CopilotModelQuickPickItem extends vscode.QuickPickItem {
+	model: vscode.LanguageModelChat;
+}
+
+const ALL_COPILOT_MODELS_SELECTOR: vscode.LanguageModelChatSelector = {
 	vendor: 'copilot',
-	family: 'gpt-4.1',
 };
 
 function normalizePathForSearch(value: string): string {
@@ -226,26 +232,134 @@ function buildModelContextFromDetectedTitles(detectedTitles: DetectedSessionTitl
 	return `Titulos detectados (${detectedTitles.length}):\n${titleLines}${overflowLine}`;
 }
 
-async function resolveModelWithDefaultPreference(requestModel: vscode.LanguageModelChat): Promise<vscode.LanguageModelChat> {
+function isDefaultModelFamily(model: vscode.LanguageModelChat): boolean {
+	return model.family.toLowerCase() === DEFAULT_MODEL_FAMILY;
+}
+
+function pickDefaultCopilotModel(models: vscode.LanguageModelChat[]): vscode.LanguageModelChat | undefined {
+	const gpt41Model = models.find((model) => isDefaultModelFamily(model));
+	if (gpt41Model) {
+		return gpt41Model;
+	}
+
+	return models[0];
+}
+
+async function getAvailableCopilotModels(): Promise<vscode.LanguageModelChat[]> {
+	return vscode.lm.selectChatModels(ALL_COPILOT_MODELS_SELECTOR);
+}
+
+async function resolveModelWithDefaultPreference(
+	context: vscode.ExtensionContext,
+	requestModel: vscode.LanguageModelChat,
+): Promise<vscode.LanguageModelChat> {
 	try {
-		const preferredModels = await vscode.lm.selectChatModels(DEFAULT_CHAT_MODEL_SELECTOR);
-		if (preferredModels.length > 0) {
-			return preferredModels[0];
+		const copilotModels = await getAvailableCopilotModels();
+		if (copilotModels.length === 0) {
+			return requestModel;
+		}
+
+		const selectedModelId = context.globalState.get<string>(MODEL_GLOBAL_STATE_KEY);
+		if (selectedModelId) {
+			const selectedModel = copilotModels.find((model) => model.id === selectedModelId);
+			if (selectedModel) {
+				return selectedModel;
+			}
+
+			console.warn(`[historico] El modelo guardado ya no esta disponible: ${selectedModelId}`);
+		}
+
+		const defaultModel = pickDefaultCopilotModel(copilotModels);
+		if (defaultModel) {
+			return defaultModel;
 		}
 	} catch (error) {
-		console.warn('[historico] No se pudo seleccionar GPT-4.1 por defecto:', error);
+		console.warn('[historico] No se pudo seleccionar modelo Copilot configurado:', error);
 	}
 
 	return requestModel;
 }
 
+function formatModelDescription(model: vscode.LanguageModelChat): string {
+	const parts = [model.family];
+	if (model.version) {
+		parts.push(model.version);
+	}
+
+	if (isDefaultModelFamily(model)) {
+		parts.push('default: GPT-4.1');
+	}
+
+	return parts.join(' | ');
+}
+
+async function selectParticipantModel(context: vscode.ExtensionContext): Promise<void> {
+	let copilotModels: vscode.LanguageModelChat[];
+
+	try {
+		copilotModels = await getAvailableCopilotModels();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		vscode.window.showErrorMessage(`No se pudieron obtener modelos de GitHub Copilot: ${message}`);
+		return;
+	}
+
+	if (copilotModels.length === 0) {
+		vscode.window.showWarningMessage('No hay modelos de GitHub Copilot disponibles para seleccionar.');
+		return;
+	}
+
+	const defaultModel = pickDefaultCopilotModel(copilotModels);
+	if (!defaultModel) {
+		vscode.window.showWarningMessage('No se encontro un modelo por defecto para el participante.');
+		return;
+	}
+
+	const selectedModelId = context.globalState.get<string>(MODEL_GLOBAL_STATE_KEY);
+	const activeModelId = selectedModelId ?? defaultModel.id;
+
+	const quickPickItems = copilotModels
+		.map((model) => ({
+			label: model.name,
+			description: formatModelDescription(model),
+			detail: model.id,
+			picked: model.id === activeModelId,
+			model,
+		} satisfies CopilotModelQuickPickItem))
+		.sort((left, right) => {
+			if (left.model.id === defaultModel.id) {
+				return -1;
+			}
+
+			if (right.model.id === defaultModel.id) {
+				return 1;
+			}
+
+			return left.label.localeCompare(right.label);
+		});
+
+	const picked = await vscode.window.showQuickPick(quickPickItems, {
+		placeHolder: 'Selecciona el modelo de GitHub Copilot para @historico (predeterminado: GPT-4.1).',
+		matchOnDescription: true,
+		matchOnDetail: true,
+	});
+
+	if (!picked) {
+		return;
+	}
+
+	await context.globalState.update(MODEL_GLOBAL_STATE_KEY, picked.model.id);
+	vscode.window.showInformationMessage(`@historico usara el modelo: ${picked.model.name}`);
+}
+
 async function answerInvocationPrompt(
+	context: vscode.ExtensionContext,
 	request: vscode.ChatRequest,
 	response: vscode.ChatResponseStream,
 	token: vscode.CancellationToken,
 	processingContext: string,
 ): Promise<void> {
-	const model = await resolveModelWithDefaultPreference(request.model);
+	const model = await resolveModelWithDefaultPreference(context, request.model);
 	const promptToAnswer = request.prompt.trim().length > 0
 		? request.prompt.trim()
 		: 'Explica brevemente el resultado del procesamiento realizado por @historico.';
@@ -287,6 +401,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.showInformationMessage('Participante de chat @historico listo para leer sesiones previas.');
 	});
 
+	const selectModelCommand = vscode.commands.registerCommand(SELECT_MODEL_COMMAND_ID, async () => {
+		await selectParticipantModel(context);
+	});
+
 	const participant = vscode.chat.createChatParticipant(CHAT_PARTICIPANT_ID, async (request, _chatContext, response, token) => {
 		const currentWorkspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		let processingOutcome: ProcessingOutcome;
@@ -298,7 +416,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 			response.markdown(processingOutcome.statusMessage);
 			console.warn('[historico] No se encontro un workspace abierto.');
-			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+			await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 
@@ -315,7 +433,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 			response.markdown(processingOutcome.statusMessage);
 			console.error('[historico] Error escaneando workspaceStorage:', error);
-			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+			await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 
@@ -327,7 +445,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				contextForModel: `No hubo coincidencias de workspaceStorage para ${currentWorkspacePath}.`,
 			};
 			response.markdown(processingOutcome.statusMessage);
-			await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+			await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			return;
 		}
 		else {
@@ -348,7 +466,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					contextForModel: `Se encontraron ${matchingFolders.length} carpeta(s) coincidente(s), pero sin customTitle.`,
 				};
 				response.markdown(processingOutcome.statusMessage);
-				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+				await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 				return;
 			}
 
@@ -407,7 +525,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				};
 
 				response.markdown(processingOutcome.statusMessage);
-				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+				await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				processingOutcome = {
@@ -416,7 +534,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				};
 				response.markdown(processingOutcome.statusMessage);
 				console.error('[historico] Error guardando sesiones en SQLite:', error);
-				await answerInvocationPrompt(request, response, token, processingOutcome.contextForModel);
+				await answerInvocationPrompt(context, request, response, token, processingOutcome.contextForModel);
 			} finally {
 				if (database) {
 					await database.close();
@@ -426,6 +544,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 
 	context.subscriptions.push(helloWorldCommand);
+	context.subscriptions.push(selectModelCommand);
 	context.subscriptions.push(participant);
 }
 

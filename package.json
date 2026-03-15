@@ -27,6 +27,10 @@
       {
         "command": "recuperar-historico-copilot.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "recuperar-historico-copilot.selectChatModel",
+        "title": "Historico: Seleccionar modelo de IA del participante"
       }
     ]
   },
