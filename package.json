@@ -32,7 +32,52 @@
         "command": "recuperar-historico-copilot.selectChatModel",
         "title": "Historico: Seleccionar modelo de IA del participante"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Recuperar Historico Copilot",
+      "properties": {
+        "recuperarHistoricoCopilot.maxTokensPerChunk": {
+          "type": "number",
+          "default": 128,
+          "minimum": 1,
+          "description": "Cantidad maxima de tokens aproximados por chunk al indexar conversaciones."
+        },
+        "recuperarHistoricoCopilot.chunkOverlapTokens": {
+          "type": "number",
+          "default": 25,
+          "minimum": 0,
+          "description": "Cantidad de tokens de solape entre chunks consecutivos."
+        },
+        "recuperarHistoricoCopilot.cohereApiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "API key de Cohere para aplicar reranking con cross-encoder. Si se deja vacio, se intentara usar la variable de entorno COHERE_API_KEY."
+        },
+        "recuperarHistoricoCopilot.embeddingsEndpoint": {
+          "type": "string",
+          "default": "http://localhost:11434/api/embeddings",
+          "scope": "machine-overridable",
+          "description": "Endpoint HTTP para solicitar embeddings."
+        },
+        "recuperarHistoricoCopilot.embeddingModel": {
+          "type": "string",
+          "default": "nomic-embed-text:latest",
+          "description": "Modelo de embeddings usado para indexar y buscar chunks."
+        },
+        "recuperarHistoricoCopilot.embeddingDimensions": {
+          "type": "number",
+          "default": 768,
+          "minimum": 1,
+          "description": "Dimensiones esperadas del vector embedding devuelto por el endpoint."
+        },
+        "recuperarHistoricoCopilot.cohereRerankModel": {
+          "type": "string",
+          "default": "rerank-v3.5",
+          "description": "Modelo de Cohere usado para reranking de resultados vectoriales."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -54,6 +99,7 @@
     "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
-    "better-sqlite3": "^12.8.0"
+    "better-sqlite3": "^12.8.0",
+    "cohere-ai": "^7.21.0"
   }
 }

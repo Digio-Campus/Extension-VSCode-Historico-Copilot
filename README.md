@@ -6,7 +6,10 @@ Extensión de VS Code que busca sesiones previas de Copilot Chat en `workspaceSt
 
 - Localiza carpetas de `workspaceStorage` asociadas al workspace abierto.
 - Escanea `chatSessions/*.jsonl` y detecta sesiones con `customTitle`.
-- Guarda en SQLite (usando `better-sqlite3`) los `customTitle` detectados por workspace.
+- Genera un embedding por cada `customTitle` usando la API REST de GitHub Models.
+- Guarda en SQLite (usando `better-sqlite3`) el `customTitle` y su embedding por workspace.
+- Genera embedding del prompt y hace busqueda vectorial en SQLite.
+- Aplica reranking con cross-encoder de Cohere sobre los resultados vectoriales y calcula score final ponderado.
 - Muestra en consola dos grupos al usar la extensión:
 - sesiones ya almacenadas en la base de datos
 - sesiones nuevas o actualizadas que se van a almacenar
@@ -23,12 +26,25 @@ Columnas principales:
 - `storage_folder`
 - `session_file`
 - `custom_title`
+- `custom_title_embedding_json`
 
 La combinación `workspace_path + storage_folder + session_file` es única para evitar duplicados por sesión.
 
 ## Dependencias
 
 - `better-sqlite3`
+
+## Configuracion de token GitHub Models
+
+- Variable en codigo: `GITHUB_MODELS_TOKEN` en `src/extension.ts`
+- Recomendado: definir `GITHUB_MODELS_TOKEN` como variable de entorno para no hardcodear secretos.
+- Si usas placeholder (`PUT_YOUR_GITHUB_TOKEN_HERE`), la extension mostrara error al intentar generar embeddings.
+
+## Configuracion de token Cohere
+
+- Variable en codigo: `COHERE_API_KEY` en `src/extension.ts`
+- Recomendado: definir `COHERE_API_KEY` como variable de entorno.
+- Si no esta configurado, la extension mantiene ranking vectorial sin reranking.
 
 ## Uso
 
