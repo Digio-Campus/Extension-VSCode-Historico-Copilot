@@ -14,21 +14,31 @@ import {
 
 const CHAT_PARTICIPANT_ID = 'recuperar-historico-copilot.recuperador';
 const SELECT_MODEL_COMMAND_ID = 'recuperar-historico-copilot.selectChatModel';
+const EXTENSION_CONFIG_SECTION = 'recuperarHistoricoCopilot';
 const WORKSPACE_STORAGE_PATH = 'C:\\Users\\Usuario\\AppData\\Roaming\\Code\\User\\workspaceStorage';
 const DATABASE_FILE_NAME = 'historico-sesiones.db';
 const MODEL_GLOBAL_STATE_KEY = 'historico.selectedCopilotModelId';
 const DEFAULT_MODEL_FAMILY = 'gpt-4.1';
-const EMBEDDINGS_ENDPOINT = 'http://localhost:11434/api/embeddings';
-const EMBEDDING_MODEL = 'nomic-embed-text:latest';
-const EMBEDDING_DIMENSIONS = 768;
-const COHERE_API_KEY = process.env.COHERE_API_KEY?.trim() ?? '';
-const COHERE_RERANK_MODEL = 'rerank-v3.5';
+const DEFAULT_EMBEDDINGS_ENDPOINT = 'http://localhost:11434/api/embeddings';
+const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text:latest';
+const DEFAULT_EMBEDDING_DIMENSIONS = 768;
+const DEFAULT_COHERE_RERANK_MODEL = 'rerank-v3.5';
 const DEFAULT_VECTOR_RESULTS_LIMIT = 10;
 const DEFAULT_RERANK_RESULTS_LIMIT = 10;
 const DEFAULT_VECTOR_SCORE_WEIGHT = 0.3;
 const DEFAULT_RERANK_SCORE_WEIGHT = 0.7;
 const DEFAULT_MAX_TOKENS_PER_CHUNK = 128;
 const DEFAULT_CHUNK_OVERLAP_TOKENS = 25;
+
+interface RuntimeConfiguration {
+	embeddingsEndpoint: string;
+	embeddingModel: string;
+	embeddingDimensions: number;
+	cohereApiKey: string;
+	cohereRerankModel: string;
+	maxTokensPerChunk: number;
+	chunkOverlapTokens: number;
+}
 
 interface DetectedJsonlFile {
 	storageFolder: string;
@@ -116,8 +126,67 @@ function buildJsonlFileKey(jsonlAbsolutePath: string): string {
 	return normalizePathForSearch(jsonlAbsolutePath);
 }
 
-function resolveCohereApiKey(): string {
-	const token = COHERE_API_KEY.trim();
+function readStringSetting(
+	configuration: vscode.WorkspaceConfiguration,
+	key: string,
+	fallback: string,
+): string {
+	const raw = configuration.get<string>(key);
+	if (typeof raw !== 'string') {
+		return fallback;
+	}
+
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function readNumberSetting(
+	configuration: vscode.WorkspaceConfiguration,
+	key: string,
+	fallback: number,
+	minimum: number,
+): number {
+	const raw = configuration.get<number>(key);
+	if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+		return fallback;
+	}
+
+	return Math.max(Math.trunc(raw), minimum);
+}
+
+function resolveRuntimeConfiguration(): RuntimeConfiguration {
+	const configuration = vscode.workspace.getConfiguration(EXTENSION_CONFIG_SECTION);
+	const configuredCohereApiKey = configuration.get<string>('cohereApiKey')?.trim() ?? '';
+	const environmentCohereApiKey = process.env.COHERE_API_KEY?.trim() ?? '';
+
+	return {
+		embeddingsEndpoint: readStringSetting(configuration, 'embeddingsEndpoint', DEFAULT_EMBEDDINGS_ENDPOINT),
+		embeddingModel: readStringSetting(configuration, 'embeddingModel', DEFAULT_EMBEDDING_MODEL),
+		embeddingDimensions: readNumberSetting(
+			configuration,
+			'embeddingDimensions',
+			DEFAULT_EMBEDDING_DIMENSIONS,
+			1,
+		),
+		cohereApiKey: configuredCohereApiKey || environmentCohereApiKey,
+		cohereRerankModel: readStringSetting(configuration, 'cohereRerankModel', DEFAULT_COHERE_RERANK_MODEL),
+		maxTokensPerChunk: readNumberSetting(
+			configuration,
+			'maxTokensPerChunk',
+			DEFAULT_MAX_TOKENS_PER_CHUNK,
+			1,
+		),
+		chunkOverlapTokens: readNumberSetting(
+			configuration,
+			'chunkOverlapTokens',
+			DEFAULT_CHUNK_OVERLAP_TOKENS,
+			0,
+		),
+	};
+}
+
+function resolveCohereApiKey(configuredToken: string): string {
+	const token = configuredToken.trim();
 	if (!token || token === 'PUT_YOUR_COHERE_API_KEY_HERE') {
 		throw new Error('Falta configurar COHERE_API_KEY para aplicar reranking con cross-encoder.');
 	}
@@ -521,6 +590,7 @@ async function rerankVectorSearchResults(
 	queryText: string,
 	candidates: SimilarChunkRecord[],
 	cohereApiKey: string,
+	cohereRerankModel: string,
 	limit: number,
 ): Promise<RankedChunkResult[]> {
 	if (candidates.length === 0) {
@@ -529,7 +599,7 @@ async function rerankVectorSearchResults(
 
 	const cappedLimit = Math.min(Math.max(limit, 1), candidates.length);
 	const rerankRequestPayload = {
-		model: COHERE_RERANK_MODEL,
+		model: cohereRerankModel,
 		query: queryText,
 		documents: candidates.map((item) => item.chunkText),
 		topN: cappedLimit,
@@ -582,7 +652,7 @@ async function parseResponsePayload(response: Response): Promise<unknown> {
 	}
 }
 
-function extractEmbeddingVector(payload: unknown): number[] {
+function extractEmbeddingVector(payload: unknown, expectedDimensions: number): number[] {
 	if (!payload || typeof payload !== 'object') {
 		throw new Error('La respuesta de embeddings no es un JSON valido.');
 	}
@@ -608,24 +678,24 @@ function extractEmbeddingVector(payload: unknown): number[] {
 		throw new Error('El vector embedding contiene valores no numericos.');
 	}
 
-	if (vector.length !== EMBEDDING_DIMENSIONS) {
+	if (vector.length !== expectedDimensions) {
 		throw new Error(
-			`Se esperaba un embedding de ${EMBEDDING_DIMENSIONS} dimensiones y se recibio ${vector.length}.`,
+			`Se esperaba un embedding de ${expectedDimensions} dimensiones y se recibio ${vector.length}.`,
 		);
 	}
 
 	return vector;
 }
 
-async function requestEmbedding(input: string): Promise<number[]> {
-	const response = await fetch(EMBEDDINGS_ENDPOINT, {
+async function requestEmbedding(input: string, runtimeConfiguration: RuntimeConfiguration): Promise<number[]> {
+	const response = await fetch(runtimeConfiguration.embeddingsEndpoint, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify({
-			model: EMBEDDING_MODEL,
+			model: runtimeConfiguration.embeddingModel,
 			prompt: input,
 		}),
 	});
@@ -636,7 +706,7 @@ async function requestEmbedding(input: string): Promise<number[]> {
 		throw new Error(`Error HTTP ${response.status} ${response.statusText}: ${detail}`);
 	}
 
-	return extractEmbeddingVector(payload);
+	return extractEmbeddingVector(payload, runtimeConfiguration.embeddingDimensions);
 }
 
 function summarizeChunk(text: string, maxLength = 140): string {
@@ -1018,6 +1088,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const participant = vscode.chat.createChatParticipant(CHAT_PARTICIPANT_ID, async (request, _chatContext, response, token) => {
 		const currentWorkspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const runtimeConfiguration = resolveRuntimeConfiguration();
 		let processingOutcome: ProcessingOutcome;
 
 		if (!currentWorkspacePath) {
@@ -1128,14 +1199,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				try {
 					const mdAbsolutePath = await convertJsonlToMarkdownInTemp(file.jsonlAbsolutePath, file.storageFolder);
 					const markdownContent = await fs.readFile(mdAbsolutePath, 'utf8');
-					const chunks = chunkText(markdownContent, DEFAULT_MAX_TOKENS_PER_CHUNK, DEFAULT_CHUNK_OVERLAP_TOKENS);
+					const chunks = chunkText(
+						markdownContent,
+						runtimeConfiguration.maxTokensPerChunk,
+						runtimeConfiguration.chunkOverlapTokens,
+					);
 
 					const chunkRecords: ChunkEmbeddingRecord[] = [];
 					for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
 						response.progress(
 							`Embedding chunk ${chunkIndex + 1}/${chunks.length} del fichero ${file.sessionFile}`,
 						);
-						const chunkEmbedding = await requestEmbedding(chunks[chunkIndex]);
+						const chunkEmbedding = await requestEmbedding(chunks[chunkIndex], runtimeConfiguration);
 						chunkRecords.push({
 							chunkIndex,
 							chunkText: chunks[chunkIndex],
@@ -1167,7 +1242,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			let hybridRankedResults: RankedChunkResult[] = [];
 			if (promptForVectorSearch.length > 0) {
 				response.progress('Generando embedding del prompt para busqueda vectorial...');
-				const promptEmbedding = await requestEmbedding(promptForVectorSearch);
+				const promptEmbedding = await requestEmbedding(promptForVectorSearch, runtimeConfiguration);
 				vectorSearchResults = await database.searchSimilarChunksByEmbedding(
 					currentWorkspacePath,
 					promptEmbedding,
@@ -1178,11 +1253,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (vectorSearchResults.length > 0) {
 					response.progress('Aplicando reranking con cross-encoder (Cohere)...');
 					try {
-						const cohereApiKey = resolveCohereApiKey();
+						const cohereApiKey = resolveCohereApiKey(runtimeConfiguration.cohereApiKey);
 						hybridRankedResults = await rerankVectorSearchResults(
 							promptForVectorSearch,
 							vectorSearchResults,
 							cohereApiKey,
+							runtimeConfiguration.cohereRerankModel,
 							DEFAULT_RERANK_RESULTS_LIMIT,
 						);
 					} catch (error) {
@@ -1206,6 +1282,13 @@ export function activate(context: vscode.ExtensionContext): void {
 					`Reranking final: ${hybridRankedResults.length} resultado(s).`,
 				contextForModel: [
 					`Workspace: ${currentWorkspacePath}`,
+					`Configuracion activa de embeddings endpoint: ${runtimeConfiguration.embeddingsEndpoint}`,
+					`Configuracion activa de embeddings model: ${runtimeConfiguration.embeddingModel}`,
+					`Configuracion activa de embedding dimensions: ${runtimeConfiguration.embeddingDimensions}`,
+					`Configuracion activa de cohere rerank model: ${runtimeConfiguration.cohereRerankModel}`,
+					`Configuracion activa de maxTokensPerChunk: ${runtimeConfiguration.maxTokensPerChunk}`,
+					`Configuracion activa de chunkOverlapTokens: ${runtimeConfiguration.chunkOverlapTokens}`,
+					`Configuracion activa de cohere api key: ${runtimeConfiguration.cohereApiKey ? '[configurada]' : '[no configurada]'}`,
 					`Carpetas coincidentes: ${matchingFolders.length}`,
 					`Rutas JSONL detectadas: ${deduplicatedFiles.length}`,
 					`Ficheros ya indexados: ${alreadyIndexedFiles.length}`,
